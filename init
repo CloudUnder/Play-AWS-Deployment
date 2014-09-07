@@ -1,0 +1,322 @@
+#!/bin/bash
+
+SCRIPT_USE_COLOURS=true
+
+# Colors
+if [ "$SCRIPT_USE_COLOURS" = true ]; then
+	ESC_SEQ="\x1b["
+	COL_RESET=$ESC_SEQ"39;49;00m"
+	COL_RED=$ESC_SEQ"31;01m"
+	COL_GREEN=$ESC_SEQ"32;01m"
+	COL_YELLOW=$ESC_SEQ"33;01m"
+	COL_BLUE=$ESC_SEQ"34;01m"
+	COL_MAGENTA=$ESC_SEQ"35;01m"
+	COL_CYAN=$ESC_SEQ"36;01m"
+fi
+
+##
+# Read config file.
+#
+# Use first argument as path of config file or fall back to "config.cfg".
+CONFIG_FILE=${1:-config.cfg}
+
+if [ ! -f "$CONFIG_FILE" ]; then
+	echo -e "${COL_RED}Error: Config file \"$CONFIG_FILE\" not found.${COL_RESET}"
+	echo "Tip: Copy \"sample.cfg\" to your own \"appname.cfg\", edit it, then run \"./init appname.cfg\"."
+	exit 1
+fi
+
+source $CONFIG_FILE
+
+
+##
+# Check some config values.
+#
+if [ -z "$local_app_path" ]; then
+	echo -e "${COL_RED}Error: Config value \"local_app_path\" is not set.${COL_RESET}"
+	exit 1
+fi
+
+if [ -z "$app_production_conf" ]; then
+	echo -e "${COL_RED}Error: Config value \"app_production_conf\" is not set.${COL_RESET}"
+	exit 1
+elif [ ! -f "$local_app_path/conf/$app_production_conf" ]; then
+	echo -e "$COL_YELLOW Warning: Play application's config file \"$local_app_path/conf/$app_production_conf\" not found. Make sure it exists before you package and deploy the app or check config value \"app_production_conf\" now and start script again. Continuing anyway.${COL_RESET}"
+fi
+
+if [ -z "$app_zip_name" ]; then
+	echo -e "${COL_RED}Error: Config value app_zip_name is not set.${COL_RESET}"
+	exit 1
+fi
+
+if [ ! -d "$local_app_path" ]; then
+	echo -e "${COL_RED}Error: App path \"$local_app_path\" not found.${COL_RESET}"
+	exit 1
+fi
+
+if [ -z "$local_aws_profile" ]; then
+	echo -e "${COL_RED}Error: Config value local_aws_profile is not set.${COL_RESET}"
+	exit 1
+fi
+
+if [ -z "$s3_deployment_url" ]; then
+	echo -e "${COL_RED}Error: Config value s3_deployment_url is not set.${COL_RESET}"
+	exit 1
+fi
+
+if [ ! -f "templates/package-app.template.sh" ]; then
+	echo -e "${COL_RED}Error: Template templates/package-app.template.sh not found. Run this script from its own directory!${COL_RESET}"
+	exit 1
+fi
+
+if [ -z "$local_app_credentials_file" ]; then
+	echo -e "$COL_YELLOW Warning: Config value local_app_credentials_file is not set. Continuing anyway.${COL_RESET}"
+elif [ ! -f "uploads/$local_app_credentials_file" ]; then
+	echo -e "${COL_RED}Error: Credentials file \"uploads/$local_app_credentials_file\" not found.${COL_RESET}"
+	exit 1
+fi
+
+if [ ! -z "$local_newrelic_agent_zip" ]; then
+	if [ ! -f "$local_newrelic_agent_zip" ]; then
+		echo -e "${COL_RED}Error: New Relic Java Agent \"$local_newrelic_agent_zip\" not found.${COL_RESET}"
+		exit 1
+	fi
+fi
+
+if [ ! -z "$local_newrelic_agent_yml" ]; then
+	if [ ! -f "$local_newrelic_agent_yml" ]; then
+		echo -e "${COL_RED}Error: New Relic Java Agent config \"$local_newrelic_agent_yml\" not found.${COL_RESET}"
+		exit 1
+	fi
+fi
+
+if [ ! -z "$url_newrelic_monitor" ]; then
+	if [ -z "$local_newrelic_monitor_cfg" ]; then
+		echo -e "${COL_RED}Error: Config value \"local_newrelic_monitor_cfg\" is required with \"url_newrelic_monitor\".${COL_RESET}"
+		exit 1
+	else
+		if [ ! -f "$local_newrelic_monitor_cfg" ]; then
+			echo -e "${COL_RED}Error: New Relic Server Monitor config \"$local_newrelic_monitor_cfg\" not found.${COL_RESET}"
+			exit 1
+		fi
+	fi
+fi
+
+if [ ! -z ${newrelic_app_id} ]; then
+	if [ -z ${newrelic_api_key} ]; then
+		echo -e "${COL_RED}Error: Config value \"newrelic_api_key\" is required with \"newrelic_app_id\".${COL_RESET}"
+		exit 1
+	fi
+fi
+
+if [ ! -z ${newrelic_api_key} ]; then
+	if [ -z ${newrelic_app_id} ]; then
+		echo -e "${COL_RED}Error: Config value \"newrelic_app_id\" is required with \"newrelic_api_key\".${COL_RESET}"
+		exit 1
+	fi
+fi
+
+
+##
+# Check if temporary directory can be used
+#
+
+if [ -d "temp" ]; then
+	rm temp/*
+	#echo -e "${COL_RED}Error: Temporary directory \"temp\" must not exist already beacause it will be created and used by this script.${COL_RESET}"
+	#exit 1
+elif [ -f "temp" ]; then
+	echo -e "${COL_RED}Error: A file named \"temp\" must not exist beacause it will be created as a directory and used by this script.${COL_RESET}"
+	exit 1
+else
+	mkdir temp
+fi
+
+if [ ! -d "temp" ]; then
+	echo -e "${COL_RED}Error: Temporary directory \"temp\" could not be created. Please check write permissions of this directory.${COL_RESET}"
+	exit 1
+fi
+
+##
+# Generate script used to create and upload ZIP package of the app.
+#
+SCRIPT_PACKAGE="$local_app_path/package-app"
+echo "#!/bin/bash" > $SCRIPT_PACKAGE
+echo "app_zip_name=\"$app_zip_name\"" >> $SCRIPT_PACKAGE
+echo "local_aws_profile=\"$local_aws_profile\"" >> $SCRIPT_PACKAGE
+echo "s3_deployment_url=\"$s3_deployment_url\"" >> $SCRIPT_PACKAGE
+cat templates/package-app.template.sh >> $SCRIPT_PACKAGE
+chmod 0755 $SCRIPT_PACKAGE
+echo -e "${COL_GREEN}Success: Script \"$SCRIPT_PACKAGE\" created.${COL_RESET}"
+
+##
+# Generate EC2 prepare script
+#
+SCRIPT_PREPARE="temp/ec2-prepare"
+echo "#!/bin/bash" > $SCRIPT_PREPARE
+echo "s3_deployment_url=\"${s3_deployment_url}\"" >> $SCRIPT_PREPARE
+if [ -z ${local_newrelic_agent_zip} ]; then
+	echo "install_newrelic_agent=false" >> $SCRIPT_PREPARE
+else
+	echo "install_newrelic_agent=true" >> $SCRIPT_PREPARE
+fi
+echo "url_newrelic_monitor=\"${url_newrelic_monitor}\"" >> $SCRIPT_PREPARE
+cat templates/ec2-prepare.template.sh >> $SCRIPT_PREPARE
+echo -e "${COL_GREEN}Success: Script \"$SCRIPT_PREPARE\" created.${COL_RESET}"
+
+##
+# Generate EC2 app update script
+#
+SCRIPT_DEPUPD="temp/ec2-appupdate"
+echo "#!/bin/bash" > $SCRIPT_DEPUPD
+echo "app_zip_name=\"${app_zip_name}\"" >> $SCRIPT_DEPUPD
+echo "s3_deployment_url=\"${s3_deployment_url}\"" >> $SCRIPT_DEPUPD
+echo "credentials_file=\"${local_app_credentials_file}\"" >> $SCRIPT_DEPUPD
+cat templates/ec2-appupdate.template.sh >> $SCRIPT_DEPUPD
+echo -e "${COL_GREEN}Success: Script \"$SCRIPT_DEPUPD\" created.${COL_RESET}"
+
+##
+# Generate EC2 app deployment script
+#
+SCRIPT_DEPLOY="temp/ec2-deploy"
+echo "#!/bin/bash" > $SCRIPT_DEPLOY
+echo "app_zip_name=\"${app_zip_name}\"" >> $SCRIPT_DEPLOY
+echo "app_production_conf=\"${app_production_conf}\"" >> $SCRIPT_DEPLOY
+echo "credentials_file=\"${local_app_credentials_file}\"" >> $SCRIPT_DEPLOY
+if [ ! -z ${newrelic_app_id} ]; then
+	echo "newrelic_app_id=\"${newrelic_app_id}\"" >> $SCRIPT_DEPLOY
+	echo "newrelic_api_key=\"${newrelic_api_key}\"" >> $SCRIPT_DEPLOY
+fi
+cat templates/ec2-deploy.template.sh >> $SCRIPT_DEPLOY
+echo -e "${COL_GREEN}Success: Script \"$SCRIPT_DEPLOY\" created.${COL_RESET}"
+
+##
+# Generate user data file for EC2 launch configuration
+#
+SCRIPT_USERDATA="temp/ec2-userdata"
+echo "#!/bin/bash" > $SCRIPT_USERDATA
+echo "yum update -y" >> $SCRIPT_USERDATA
+echo "cd /root/" >> $SCRIPT_USERDATA
+echo "aws s3 cp s3://spiegeleye-deployment/ec2-prepare ." >> $SCRIPT_USERDATA
+echo "chmod 0700 ec2-prepare" >> $SCRIPT_USERDATA
+echo "./ec2-prepare" >> $SCRIPT_USERDATA
+echo -e "${COL_GREEN}Success: Script \"$SCRIPT_USERDATA\" created.${COL_RESET}"
+
+##
+# Print some information
+#
+echo
+echo "The following script should be used to build and upload a standalone version of your app:"
+echo " - $SCRIPT_PACKAGE"
+echo
+echo "The following scripts should be made available to your EC2 app server instances by storing them on S3 location \"$s3_deployment_url\":"
+echo " - $SCRIPT_PREPARE"
+echo " - $SCRIPT_DEPUPD"
+echo " - $SCRIPT_DEPLOY"
+echo
+echo "The following script should be used as \"user data\" script to launch your EC2 app server instances:"
+echo " - $SCRIPT_USERDATA"
+echo
+
+##
+# Upload scripts to S3
+#
+while true; do
+	read -p "Do you wish to upload scripts and credentials to S3 now? " yn
+	case $yn in
+		[Yy]*)
+			echo "Uploading \"$SCRIPT_PREPARE\"..."
+			aws --profile $local_aws_profile s3 cp "$SCRIPT_PREPARE" $s3_deployment_url && \
+				echo -e " ${COL_GREEN}OK${COL_RESET}"
+
+			echo "Uploading \"$SCRIPT_DEPUPD\"..."
+			aws --profile $local_aws_profile s3 cp "$SCRIPT_DEPUPD" $s3_deployment_url && \
+				echo -e " ${COL_GREEN}OK${COL_RESET}"
+
+			echo "Uploading \"$SCRIPT_DEPLOY\"..."
+			aws --profile $local_aws_profile s3 cp "$SCRIPT_DEPLOY" $s3_deployment_url && \
+				echo -e " ${COL_GREEN}OK${COL_RESET}"
+
+			if [ ! -z "$local_app_credentials_file" ]; then
+				echo "Uploading \"uploads/$local_app_credentials_file\"..."
+				aws --profile $local_aws_profile s3 cp "uploads/$local_app_credentials_file" $s3_deployment_url && \
+					echo -e " ${COL_GREEN}OK${COL_RESET}"
+			fi
+
+			break;;
+
+		[Nn]*) break;;
+	*) echo "Please answer y or n.";;
+	esac
+done
+
+
+##
+# Upload New Relic Java Agent to S3 (optional)
+#
+if [ ! -z ${local_newrelic_agent_zip} ]; then
+	while true; do
+		read -p "Do you wish to upload the New Relic Java Agent to S3 now? " yn
+		case $yn in
+			[Yy]*)
+				echo "Uploading \"${local_newrelic_agent_zip}\"..."
+
+				TEMP_FILE="temp/newrelic-java.zip"
+				cp "${local_newrelic_agent_zip}" "${TEMP_FILE}"
+				aws --profile $local_aws_profile s3 cp "${TEMP_FILE}" $s3_deployment_url && \
+					echo -e " ${COL_GREEN}OK${COL_RESET}"
+				rm ${TEMP_FILE}
+
+				if [ ! -z ${local_newrelic_agent_yml} ]; then
+					echo "Uploading \"${local_newrelic_agent_yml}\"..."
+
+					TEMP_FILE="temp/newrelic.yml"
+					cp "${local_newrelic_agent_yml}" "${TEMP_FILE}"
+					aws --profile $local_aws_profile s3 cp "${TEMP_FILE}" $s3_deployment_url && \
+						echo -e " ${COL_GREEN}OK${COL_RESET}"
+					rm ${TEMP_FILE}
+				fi
+
+				break;;
+
+			[Nn]*) break;;
+		*) echo "Please answer y or n.";;
+		esac
+	done
+fi
+
+
+##
+# Upload New Relic Server Monitor config file
+#
+if [ ! -z ${local_newrelic_monitor_cfg} ]; then
+	while true; do
+		read -p "Do you wish to upload the New Relic Server Monitor config file to S3 now? " yn
+		case $yn in
+			[Yy]*)
+				echo "Uploading \"${local_newrelic_monitor_cfg}\"..."
+
+				TEMP_FILE="temp/nrsysmond.cfg"
+				cp "${local_newrelic_monitor_cfg}" "${TEMP_FILE}"
+				aws --profile $local_aws_profile s3 cp "${TEMP_FILE}" $s3_deployment_url && \
+					echo -e " ${COL_GREEN}OK${COL_RESET}"
+				rm ${TEMP_FILE}
+
+				break;;
+
+			[Nn]*) break;;
+		*) echo "Please answer y or n.";;
+		esac
+	done
+fi
+
+
+
+##
+# Remove temp directory
+#
+echo
+echo "Done."
+echo "Your next step is to build and upload the latest version of your app by running the script \"$SCRIPT_PACKAGE\"."
+echo
+# rm -r temp
